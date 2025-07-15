@@ -1,73 +1,77 @@
+// server.js
 const express = require('express');
-const fetch = require('node-fetch');
-const cheerio = require('cheerio');
+const puppeteer = require('puppeteer');
 const moment = require('moment-timezone');
 const fs = require('fs');
-const app = express();
-const PORT = 3000;
 
+const app = express();
 app.use(express.static('public'));
 
-let prevStock = { seed: [], gear: [], egg: [] };
 const stockPath = './data/previousStock.json';
+let prevStock = { seed: [], gear: [], egg: [] };
 if (fs.existsSync(stockPath)) prevStock = JSON.parse(fs.readFileSync(stockPath));
 
-// Fetch and compare stock
 async function fetchStock() {
-    const res = await fetch('https://growagarden.gg/stocks');
-    const html = await res.text();
-    const $ = cheerio.load(html);
+  const browser = await puppeteer.launch({ args: ['--no-sandbox'] });
+  const page = await browser.newPage();
+  await page.goto('https://growagarden.gg/stocks', { waitUntil: 'networkidle2' });
+  await page.waitForTimeout(3000);
 
-    const parseStock = (selector) => {
-        const list = [];
-        $(selector).each((i, el) => {
-            const text = $(el).text().trim();
-            const match = text.match(/(.*?) - Available Stock: (\d+)/);
-            if (match) list.push(`[${match[2]}x] ${match[1]}`);
-        });
-        return list;
-    };
+  const sections = await page.evaluate(() => {
+    const result = { seed: [], gear: [], egg: [] };
+    document.querySelectorAll('section').forEach(sec => {
+      const title = sec.querySelector('h2, h3, h4')?.innerText?.toLowerCase() || '';
+      const items = Array.from(sec.querySelectorAll('li, div.stock-item')).map(el => el.innerText.trim());
+      if (title.includes('seed')) result.seed = items;
+      if (title.includes('gear')) result.gear = items;
+      if (title.includes('egg')) result.egg = items;
+    });
+    return result;
+  });
 
-    const seed = parseStock('h3:contains("Current Seed Shop Stock in Grow a Garden") + ul > li');
-    const gear = parseStock('h3:contains("Current Gear Shop Stock in Grow a Garden") + ul > li');
-    const egg  = parseStock('h3:contains("Current Egg Shop Stock in Grow a Garden") + ul > li');
+  await browser.close();
 
-    const newSeed = seed.filter(i => !prevStock.seed.includes(i));
-    const newGear = gear.filter(i => !prevStock.gear.includes(i));
-    const newEgg  = egg.filter(i => !prevStock.egg.includes(i));
+  const newSeed = sections.seed.filter(i => !prevStock.seed.includes(i));
+  const newGear = sections.gear.filter(i => !prevStock.gear.includes(i));
+  const newEgg  = sections.egg.filter(i => !prevStock.egg.includes(i));
 
-    const now = moment().tz('Asia/Jakarta').format('D MMMM YYYY, HH:mm [WIB]');
+  const updated = moment().tz('Asia/Jakarta').format('D MMMM YYYY, HH:mm [WIB]');
+  fs.writeFileSync(stockPath, JSON.stringify(sections));
 
-    // Simpan stock baru
-    fs.writeFileSync(stockPath, JSON.stringify({ seed, gear, egg }));
-
-    return { seed, gear, egg, newSeed, newGear, newEgg, updated: now };
+  return { ...sections, newSeed, newGear, newEgg, updated };
 }
 
 async function fetchWeather() {
-    const res = await fetch('https://growagarden.gg/weather');
-    const html = await res.text();
-    const $ = cheerio.load(html);
+  const browser = await puppeteer.launch({ args: ['--no-sandbox'] });
+  const page = await browser.newPage();
+  await page.goto('https://growagarden.gg/weather', { waitUntil: 'networkidle2' });
+  await page.waitForTimeout(2000);
 
-    const currentWeather = $('h2:contains("Current Weather") + p').text().trim();
-    const temperature = $('p:contains("Temperature")').text().trim();
-    const humidity = $('p:contains("Humidity")').text().trim();
-    const wind = $('p:contains("Wind")').text().trim();
-    const forecast = $('h3:contains("Weather Forecast") + p').text().trim();
+  const weather = await page.evaluate(() => {
+    const cw = document.querySelector('h2 + p')?.innerText.trim() || '';
+    const temp = Array.from(document.querySelectorAll('p'))
+      .find(p => p.innerText.toLowerCase().includes('temperature'))?.innerText.trim() || '';
+    const hum = Array.from(document.querySelectorAll('p'))
+      .find(p => p.innerText.toLowerCase().includes('humidity'))?.innerText.trim() || '';
+    const wind = Array.from(document.querySelectorAll('p'))
+      .find(p => p.innerText.toLowerCase().includes('wind'))?.innerText.trim() || '';
+    const forecast = document.querySelector('h3 + p')?.innerText.trim() || '';
+    return { currentWeather: cw, temperature: temp, humidity: hum, wind, forecast };
+  });
 
-    return { currentWeather, temperature, humidity, wind, forecast };
+  await browser.close();
+  return weather;
 }
 
 app.get('/api/data', async (req, res) => {
-    try {
-        const stock = await fetchStock();
-        const weather = await fetchWeather();
-        res.json({ stock, weather });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+  try {
+    const stock = await fetchStock();
+    const weather = await fetchWeather();
+    res.json({ stock, weather });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.listen(PORT, () => {
-    console.log(`Server running at http://localhost:${PORT}`);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Listening on http://localhost:${PORT}`));
